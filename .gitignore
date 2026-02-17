@@ -1,0 +1,13 @@
+*.log
+.DS_Store
+.vite
+node_modules/
+dist/
+.beads/
+.ralph-tui/
+.claude/
+.gitattributes
+.worktrees/
+
+# bv (beads viewer) local config and caches
+.bv/

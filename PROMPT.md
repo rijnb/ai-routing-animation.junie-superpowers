@@ -1,0 +1,14 @@
+Develop a TypeScript application to animate A* routing calculations:
+- The user selects the OSM file using a custom made file browser, that scans the directory public/maps for OSM files.
+- The OSM XML files are gzipped and end with `.osm.gz`.
+- The selected map is parsed and shown on the screen using a clear map palette. 
+- The UI contains a toggle to shown background OSM map tiles 50% transparent (default on). 
+- The user can click on an origin/destination point on the map. A route is calculated between origin and destination. 
+- There are 3 routing modes: car, bicycle and pedestrian. Depending on the routing mode, the clicked points are snapped to (interpolated points on the) roads that are valid for that type of routing. 
+- Road restrictions apply to cars (such as turn restrictions and one-way). Not to bicycles and pedestrians.
+- Make sure all road restrictions, including barriers, turn restrictions, forbidden entries, etc. are respected.
+- The routing engine is implemented as an A* routing engine using "fastest route", based on expected travel speed per road type; bicycles always travel at 20km/h and pedestrians always walk at 5km/h.
+- When the user switches between routing modes, the route is recalculated. The origin/destination may need to be re-map matched on a valid road type for that.
+- When the route is calculated, the system animates all roads that are being examined as blue lines. During this animation, the fastest route (end result) is always highlighted (growing, like the rest of the tree) as a thick red line. The red line must be on top of the rest, so it is always visible.
+- The user can select an animation speed from 1-10 (very slow to very fast).
+- All UI elements are presented in a semi-transparent floating settings box, that can be moved by the user. The user must be able to select a dark and light theme for the UI.
