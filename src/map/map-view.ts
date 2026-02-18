@@ -5,16 +5,20 @@ export class MapView {
   private tileLayer: L.TileLayer;
 
   constructor(containerId: string) {
+    console.debug(`[MapView] Creating Leaflet map in #${containerId}...`);
+    const mapStart = performance.now();
     this.map = L.map(containerId, {
       zoomControl: true,
       attributionControl: true,
     });
+    console.debug(`[MapView] L.map created, took ${(performance.now() - mapStart).toFixed(1)}ms`);
 
     // Create custom panes with z-ordering
     this.map.createPane('roadsPane').style.zIndex = '400';
     this.map.createPane('exploredPane').style.zIndex = '450';
     this.map.createPane('routePane').style.zIndex = '500';
     this.map.createPane('markersPane').style.zIndex = '600';
+    console.debug('[MapView] Custom panes created');
 
     // OSM tile layer at 50% opacity (default on)
     this.tileLayer = L.tileLayer(
@@ -25,9 +29,11 @@ export class MapView {
         maxZoom: 19,
       },
     ).addTo(this.map);
+    console.debug('[MapView] Tile layer added');
 
     // Default view (Netherlands)
     this.map.setView([52.37, 4.89], 14);
+    console.debug(`[MapView] Default view set, total constructor: ${(performance.now() - mapStart).toFixed(1)}ms`);
   }
 
   fitBounds(bounds: L.LatLngBoundsExpression): void {

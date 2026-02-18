@@ -23,8 +23,11 @@ export class MapRenderer {
   }
 
   drawRoads(graph: RoutingGraph): void {
+    console.debug('[drawRoads] Starting road rendering...');
+    const drawStart = performance.now();
     this.clearRoads();
     const seen = new Set<string>();
+    let polylineCount = 0;
 
     for (const edges of graph.adjacency.values()) {
       for (const edge of edges) {
@@ -42,8 +45,10 @@ export class MapRenderer {
           opacity: 0.7,
           pane: 'roadsPane',
         }).addTo(this.roadLayerGroup);
+        polylineCount++;
       }
     }
+    console.debug(`[drawRoads] Complete: ${polylineCount} polylines drawn, took ${(performance.now() - drawStart).toFixed(1)}ms`);
   }
 
   clearRoads(): void {

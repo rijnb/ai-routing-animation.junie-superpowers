@@ -38,9 +38,12 @@ export class SettingsPanel {
   }
 
   async init(): Promise<void> {
+    console.debug('[SettingsPanel] init() called, loading map file list...');
     const files = await loadMapFileList();
+    console.debug(`[SettingsPanel] Map file list loaded: ${files.length} files: [${files.join(', ')}]`);
     this.setMapFiles(files);
     if (files.length > 0) {
+      console.debug(`[SettingsPanel] Auto-selecting first map file: ${files[0]}`);
       this.callbacks.onMapFileSelect(files[0]);
     }
   }

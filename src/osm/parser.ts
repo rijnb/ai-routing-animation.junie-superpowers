@@ -66,7 +66,12 @@ function getTagValue(body: string, key: string): string | undefined {
  * parsed with small-scope string operations.
  */
 export function parseOSM(xmlString: string): RoutingGraph {
+  console.debug(`[parseOSM] Starting parse of XML string: ${xmlString.length} chars`);
+  const totalStart = performance.now();
+
   // ── 1. Parse nodes ───────────────────────────────────────────────
+  console.debug('[parseOSM] Phase 1: Parsing nodes...');
+  const nodesStart = performance.now();
   const allNodes = new Map<number, GraphNode>();
 
   let pos = 0;
@@ -107,8 +112,12 @@ export function parseOSM(xmlString: string): RoutingGraph {
     }
     allNodes.set(id, { id, lat, lon, barrier });
   }
+  console.debug(`[parseOSM] Phase 1 complete: ${allNodes.size} nodes parsed, took ${(performance.now() - nodesStart).toFixed(1)}ms`);
 
   // ── 2. Parse ways → edges ────────────────────────────────────────
+  console.debug('[parseOSM] Phase 2: Parsing ways → edges...');
+  const waysStart = performance.now();
+  let wayCount = 0;
   const adjacency = new Map<number, GraphEdge[]>();
   const referencedNodes = new Set<number>();
 
@@ -172,6 +181,7 @@ export function parseOSM(xmlString: string): RoutingGraph {
       ndPos = ndEnd + 2;
     }
 
+    wayCount++;
     // Build edges for consecutive node pairs
     for (let j = 0; j < nodeIds.length - 1; j++) {
       const fromId = nodeIds[j];
@@ -239,7 +249,11 @@ export function parseOSM(xmlString: string): RoutingGraph {
     }
   }
 
+  console.debug(`[parseOSM] Phase 2 complete: ${wayCount} highway ways, ${adjacency.size} adjacency entries, ${referencedNodes.size} referenced nodes, took ${(performance.now() - waysStart).toFixed(1)}ms`);
+
   // ── 3. Parse turn restrictions ───────────────────────────────────
+  console.debug('[parseOSM] Phase 3: Parsing turn restrictions...');
+  const restrictionsStart = performance.now();
   const restrictions: TurnRestriction[] = [];
 
   pos = 0;
@@ -289,12 +303,18 @@ export function parseOSM(xmlString: string): RoutingGraph {
     }
   }
 
+  console.debug(`[parseOSM] Phase 3 complete: ${restrictions.length} restrictions, took ${(performance.now() - restrictionsStart).toFixed(1)}ms`);
+
   // ── 4. Build final node map (only referenced nodes) ──────────────
+  console.debug('[parseOSM] Phase 4: Building final node map...');
+  const finalNodeStart = performance.now();
   const nodes = new Map<number, GraphNode>();
   for (const id of referencedNodes) {
     const node = allNodes.get(id);
     if (node) nodes.set(id, node);
   }
 
+  console.debug(`[parseOSM] Phase 4 complete: ${nodes.size} final nodes, took ${(performance.now() - finalNodeStart).toFixed(1)}ms`);
+  console.debug(`[parseOSM] Total parse time: ${(performance.now() - totalStart).toFixed(1)}ms`);
   return { nodes, adjacency, restrictions };
 }
