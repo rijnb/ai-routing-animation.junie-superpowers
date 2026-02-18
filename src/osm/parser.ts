@@ -27,34 +27,83 @@ function intern(s: string): string {
 }
 
 /**
+ * Extract the value of an XML attribute from a tag string.
+ * Returns undefined if the attribute is not found.
+ */
+function getAttr(tag: string, name: string): string | undefined {
+  const key = name + '="';
+  const i = tag.indexOf(key);
+  if (i === -1) return undefined;
+  const start = i + key.length;
+  const end = tag.indexOf('"', start);
+  if (end === -1) return undefined;
+  return tag.substring(start, end);
+}
+
+/**
+ * Extract the value of an OSM <tag k="..." v="..."/> element.
+ * Searches for k="key" and returns the corresponding v value.
+ */
+function getTagValue(body: string, key: string): string | undefined {
+  const search = 'k="' + key + '"';
+  const i = body.indexOf(search);
+  if (i === -1) return undefined;
+  // Find the v="..." after the k="..."
+  const vStart = body.indexOf('v="', i + search.length);
+  if (vStart === -1) return undefined;
+  const valStart = vStart + 3;
+  const valEnd = body.indexOf('"', valStart);
+  if (valEnd === -1) return undefined;
+  return body.substring(valStart, valEnd);
+}
+
+/**
  * Lightweight streaming OSM XML parser.
  *
- * Instead of building a full DOM tree via DOMParser (which roughly doubles
- * memory usage), this scans the XML string with targeted regex passes for
- * <node>, <way>, and <relation> elements.  Each element is parsed
- * individually and discarded immediately, so peak memory stays close to
- * the size of the XML string itself plus the final graph structures.
+ * Uses indexOf-based scanning instead of global regexes to avoid
+ * catastrophic backtracking on large XML strings (which causes Safari
+ * to hang). Individual elements are extracted with substring and
+ * parsed with small-scope string operations.
  */
 export function parseOSM(xmlString: string): RoutingGraph {
   // ── 1. Parse nodes ───────────────────────────────────────────────
-  // We store every node in a compact Float64Array-backed structure.
-  // Key: node id → { lat, lon, barrier? }
   const allNodes = new Map<number, GraphNode>();
 
-  const nodeRe = /<node\s[^>]*?\bid="(\d+)"[^>]*?\blat="([^"]+)"[^>]*?\blon="([^"]+)"[^>]*?(?:\/>|>([\s\S]*?)<\/node>)/g;
-  let m: RegExpExecArray | null;
+  let pos = 0;
+  while (pos < xmlString.length) {
+    const nodeStart = xmlString.indexOf('<node ', pos);
+    if (nodeStart === -1) break;
 
-  while ((m = nodeRe.exec(xmlString)) !== null) {
-    const id = Number(m[1]);
-    const lat = Number(m[2]);
-    const lon = Number(m[3]);
+    // Check for self-closing or body-containing node
+    const selfClose = xmlString.indexOf('/>', nodeStart);
+    const bodyOpen = xmlString.indexOf('>', nodeStart);
+    if (bodyOpen === -1) break;
+
+    let element: string;
+    let inner: string | undefined;
+
+    if (selfClose !== -1 && selfClose <= bodyOpen) {
+      // Self-closing: <node ... />
+      element = xmlString.substring(nodeStart, selfClose + 2);
+      pos = selfClose + 2;
+    } else {
+      // Has body: <node ...>...</node>
+      const closeTag = xmlString.indexOf('</node>', bodyOpen);
+      if (closeTag === -1) { pos = bodyOpen + 1; continue; }
+      element = xmlString.substring(nodeStart, closeTag + 7);
+      inner = xmlString.substring(bodyOpen + 1, closeTag);
+      pos = closeTag + 7;
+    }
+
+    const id = Number(getAttr(element, 'id'));
+    const lat = Number(getAttr(element, 'lat'));
+    const lon = Number(getAttr(element, 'lon'));
     if (isNaN(id) || isNaN(lat) || isNaN(lon)) continue;
 
     let barrier: string | undefined;
-    const inner = m[4]; // undefined for self-closing nodes
     if (inner) {
-      const bm = /\bk="barrier"\s+v="([^"]+)"/.exec(inner);
-      if (bm) barrier = intern(bm[1]);
+      const bv = getTagValue(inner, 'barrier');
+      if (bv) barrier = intern(bv);
     }
     allNodes.set(id, { id, lat, lon, barrier });
   }
@@ -63,51 +112,64 @@ export function parseOSM(xmlString: string): RoutingGraph {
   const adjacency = new Map<number, GraphEdge[]>();
   const referencedNodes = new Set<number>();
 
-  const wayRe = /<way\s[^>]*?\bid="(\d+)"[^>]*?>([\s\S]*?)<\/way>/g;
-  const ndRe = /<nd\s+ref="(\d+)"\s*\/>/g;
+  pos = 0;
+  while (pos < xmlString.length) {
+    const wayStart = xmlString.indexOf('<way ', pos);
+    if (wayStart === -1) break;
 
-  while ((m = wayRe.exec(xmlString)) !== null) {
-    const wayBody = m[2];
+    const bodyOpen = xmlString.indexOf('>', wayStart);
+    if (bodyOpen === -1) break;
 
-    // Quick highway check: skip ways without highway tag (majority of ways)
-    const hwMatch = /\bk="highway"\s+v="([^"]+)"/.exec(wayBody);
-    if (!hwMatch) continue;
+    const closeTag = xmlString.indexOf('</way>', bodyOpen);
+    if (closeTag === -1) { pos = bodyOpen + 1; continue; }
 
-    const wayId = Number(m[1]);
-    const highway = intern(hwMatch[1]);
+    const wayTag = xmlString.substring(wayStart, bodyOpen + 1);
+    const wayBody = xmlString.substring(bodyOpen + 1, closeTag);
+    pos = closeTag + 6;
 
-    // Parse tags with targeted regexes — only the ones we need
-    const owMatch = /\bk="oneway"\s+v="([^"]+)"/.exec(wayBody);
-    const owVal = owMatch ? owMatch[1] : null;
+    // Quick highway check: skip ways without highway tag
+    const highway = getTagValue(wayBody, 'highway');
+    if (!highway) continue;
+
+    const wayId = Number(getAttr(wayTag, 'id'));
+    const internedHighway = intern(highway);
+
+    // Parse tags
+    const owVal = getTagValue(wayBody, 'oneway');
     const oneway = owVal === 'yes' || owVal === '1' || owVal === 'true';
 
-    const owbMatch = /\bk="oneway:bicycle"\s+v="([^"]+)"/.exec(wayBody);
-    const onewayBicycle = owbMatch ? owbMatch[1] !== 'no' : true;
+    const owbVal = getTagValue(wayBody, 'oneway:bicycle');
+    const onewayBicycle = owbVal ? owbVal !== 'no' : true;
 
-    const msMatch = /\bk="maxspeed"\s+v="([^"]+)"/.exec(wayBody);
-    const maxspeed = msMatch ? (parseInt(msMatch[1], 10) || 0) : 0;
+    const msVal = getTagValue(wayBody, 'maxspeed');
+    const maxspeed = msVal ? (parseInt(msVal, 10) || 0) : 0;
 
-    const accMatch = /\bk="access"\s+v="([^"]+)"/.exec(wayBody);
-    const access = accMatch ? intern(accMatch[1]) : undefined;
+    const accVal = getTagValue(wayBody, 'access');
+    const access = accVal ? intern(accVal) : undefined;
 
-    const mvMatch = /\bk="motor_vehicle"\s+v="([^"]+)"/.exec(wayBody);
-    const motorVehicle = mvMatch ? intern(mvMatch[1]) : undefined;
+    const mvVal = getTagValue(wayBody, 'motor_vehicle');
+    const motorVehicle = mvVal ? intern(mvVal) : undefined;
 
-    const vMatch = /\bk="vehicle"\s+v="([^"]+)"/.exec(wayBody);
-    const vehicle = vMatch ? intern(vMatch[1]) : undefined;
+    const vVal = getTagValue(wayBody, 'vehicle');
+    const vehicle = vVal ? intern(vVal) : undefined;
 
-    const bicMatch = /\bk="bicycle"\s+v="([^"]+)"/.exec(wayBody);
-    const bicycleTag = bicMatch ? intern(bicMatch[1]) : undefined;
+    const bicVal = getTagValue(wayBody, 'bicycle');
+    const bicycleTag = bicVal ? intern(bicVal) : undefined;
 
-    const footMatch = /\bk="foot"\s+v="([^"]+)"/.exec(wayBody);
-    const footTag = footMatch ? intern(footMatch[1]) : undefined;
+    const footVal = getTagValue(wayBody, 'foot');
+    const footTag = footVal ? intern(footVal) : undefined;
 
-    // Collect nd refs
+    // Collect nd refs using indexOf scanning
     const nodeIds: number[] = [];
-    ndRe.lastIndex = 0;
-    let nm: RegExpExecArray | null;
-    while ((nm = ndRe.exec(wayBody)) !== null) {
-      nodeIds.push(Number(nm[1]));
+    let ndPos = 0;
+    while (ndPos < wayBody.length) {
+      const ndStart = wayBody.indexOf('<nd ', ndPos);
+      if (ndStart === -1) break;
+      const ndEnd = wayBody.indexOf('/>', ndStart);
+      if (ndEnd === -1) break;
+      const refVal = getAttr(wayBody.substring(ndStart, ndEnd + 2), 'ref');
+      if (refVal) nodeIds.push(Number(refVal));
+      ndPos = ndEnd + 2;
     }
 
     // Build edges for consecutive node pairs
@@ -128,7 +190,7 @@ export function parseOSM(xmlString: string): RoutingGraph {
         from: fromId,
         to: toId,
         wayId,
-        highway,
+        highway: internedHighway,
         maxspeed,
         oneway,
         onewayBicycle,
@@ -154,7 +216,7 @@ export function parseOSM(xmlString: string): RoutingGraph {
         from: toId,
         to: fromId,
         wayId,
-        highway,
+        highway: internedHighway,
         maxspeed,
         oneway,
         onewayBicycle,
@@ -179,33 +241,51 @@ export function parseOSM(xmlString: string): RoutingGraph {
 
   // ── 3. Parse turn restrictions ───────────────────────────────────
   const restrictions: TurnRestriction[] = [];
-  const relRe = /<relation\s[^>]*?>([\s\S]*?)<\/relation>/g;
 
-  while ((m = relRe.exec(xmlString)) !== null) {
-    const relBody = m[1];
-    const typeMatch = /\bk="type"\s+v="([^"]+)"/.exec(relBody);
-    if (!typeMatch || typeMatch[1] !== 'restriction') continue;
+  pos = 0;
+  while (pos < xmlString.length) {
+    const relStart = xmlString.indexOf('<relation ', pos);
+    if (relStart === -1) break;
 
-    const restMatch = /\bk="restriction"\s+v="([^"]+)"/.exec(relBody);
-    if (!restMatch) continue;
+    const bodyOpen = xmlString.indexOf('>', relStart);
+    if (bodyOpen === -1) break;
+
+    const closeTag = xmlString.indexOf('</relation>', bodyOpen);
+    if (closeTag === -1) { pos = bodyOpen + 1; continue; }
+
+    const relBody = xmlString.substring(bodyOpen + 1, closeTag);
+    pos = closeTag + 11;
+
+    const typeVal = getTagValue(relBody, 'type');
+    if (typeVal !== 'restriction') continue;
+
+    const restVal = getTagValue(relBody, 'restriction');
+    if (!restVal) continue;
 
     let fromWayId = 0;
     let viaNodeId = 0;
     let toWayId = 0;
 
-    const memRe = /<member\s+type="(\w+)"\s+ref="(\d+)"\s+role="(\w+)"\s*\/>/g;
-    let mm: RegExpExecArray | null;
-    while ((mm = memRe.exec(relBody)) !== null) {
-      const memberType = mm[1];
-      const ref = Number(mm[2]);
-      const role = mm[3];
+    // Parse <member> elements using indexOf
+    let memPos = 0;
+    while (memPos < relBody.length) {
+      const memStart = relBody.indexOf('<member ', memPos);
+      if (memStart === -1) break;
+      const memEnd = relBody.indexOf('/>', memStart);
+      if (memEnd === -1) break;
+      const memTag = relBody.substring(memStart, memEnd + 2);
+      memPos = memEnd + 2;
+
+      const memberType = getAttr(memTag, 'type');
+      const ref = Number(getAttr(memTag, 'ref'));
+      const role = getAttr(memTag, 'role');
       if (role === 'from' && memberType === 'way') fromWayId = ref;
       if (role === 'via' && memberType === 'node') viaNodeId = ref;
       if (role === 'to' && memberType === 'way') toWayId = ref;
     }
 
     if (fromWayId && viaNodeId && toWayId) {
-      restrictions.push({ fromWayId, viaNodeId, toWayId, type: intern(restMatch[1]) });
+      restrictions.push({ fromWayId, viaNodeId, toWayId, type: intern(restVal) });
     }
   }
 
