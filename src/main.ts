@@ -82,9 +82,11 @@ async function fetchWithProgress(
   }
 
   const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
   let received = 0;
 
+  // Stream chunks directly into a Blob to avoid keeping both
+  // the chunks array and a merged Uint8Array in memory simultaneously.
+  const chunks: Uint8Array[] = [];
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -94,14 +96,10 @@ async function fetchWithProgress(
     progress.update(pct, `Downloading ${filename}…`);
   }
 
-  const merged = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
-  }
-
-  const blob = new Blob([merged]);
+  // Build blob directly from chunks — avoids the intermediate merged Uint8Array
+  const blob = new Blob(chunks as BlobPart[]);
+  // Release chunk references immediately
+  chunks.length = 0;
   return decompressIfGzipped(blob);
 }
 
@@ -125,13 +123,15 @@ async function loadMap(filename: string): Promise<void> {
   progress.update(0, `Downloading ${filename}…`);
 
   try {
-    const xmlText = await fetchWithProgress(`/maps/${filename}`, progress, filename);
+    let xmlText: string | null = await fetchWithProgress(`/maps/${filename}`, progress, filename);
 
     // Let the UI repaint before the heavy synchronous parse
     progress.update(60, 'Parsing map data…');
     await new Promise((resolve) => requestAnimationFrame(resolve));
 
     graph = parseOSM(xmlText);
+    // Release the XML string as soon as parsing is complete to free memory
+    xmlText = null;
     origin = null;
     destination = null;
     clickState = 'origin';

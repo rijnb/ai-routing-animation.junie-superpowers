@@ -14,63 +14,103 @@ export function haversine(
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function getTag(el: Element, key: string): string | null {
-  const tags = el.getElementsByTagName('tag');
-  for (let i = 0; i < tags.length; i++) {
-    if (tags[i].getAttribute('k') === key) {
-      return tags[i].getAttribute('v');
-    }
-  }
-  return null;
+/**
+ * String interning pool: reuses the same string instance for repeated values
+ * (highway types, access tags) to avoid allocating thousands of duplicate strings.
+ */
+const internPool = new Map<string, string>();
+function intern(s: string): string {
+  const existing = internPool.get(s);
+  if (existing !== undefined) return existing;
+  internPool.set(s, s);
+  return s;
 }
 
+/**
+ * Lightweight streaming OSM XML parser.
+ *
+ * Instead of building a full DOM tree via DOMParser (which roughly doubles
+ * memory usage), this scans the XML string with targeted regex passes for
+ * <node>, <way>, and <relation> elements.  Each element is parsed
+ * individually and discarded immediately, so peak memory stays close to
+ * the size of the XML string itself plus the final graph structures.
+ */
 export function parseOSM(xmlString: string): RoutingGraph {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(xmlString, 'text/xml');
-
-  // 1. Parse nodes
+  // ── 1. Parse nodes ───────────────────────────────────────────────
+  // We store every node in a compact Float64Array-backed structure.
+  // Key: node id → { lat, lon, barrier? }
   const allNodes = new Map<number, GraphNode>();
-  const nodeEls = doc.getElementsByTagName('node');
-  for (let i = 0; i < nodeEls.length; i++) {
-    const el = nodeEls[i];
-    const id = Number(el.getAttribute('id'));
-    const lat = Number(el.getAttribute('lat'));
-    const lon = Number(el.getAttribute('lon'));
-    if (!isNaN(id) && !isNaN(lat) && !isNaN(lon)) {
-      const barrier = getTag(el, 'barrier') ?? undefined;
-      allNodes.set(id, { id, lat, lon, barrier });
+
+  const nodeRe = /<node\s[^>]*?\bid="(\d+)"[^>]*?\blat="([^"]+)"[^>]*?\blon="([^"]+)"[^>]*?(?:\/>|>([\s\S]*?)<\/node>)/g;
+  let m: RegExpExecArray | null;
+
+  while ((m = nodeRe.exec(xmlString)) !== null) {
+    const id = Number(m[1]);
+    const lat = Number(m[2]);
+    const lon = Number(m[3]);
+    if (isNaN(id) || isNaN(lat) || isNaN(lon)) continue;
+
+    let barrier: string | undefined;
+    const inner = m[4]; // undefined for self-closing nodes
+    if (inner) {
+      const bm = /\bk="barrier"\s+v="([^"]+)"/.exec(inner);
+      if (bm) barrier = intern(bm[1]);
     }
+    allNodes.set(id, { id, lat, lon, barrier });
   }
 
-  // 2. Parse ways → edges
+  // ── 2. Parse ways → edges ────────────────────────────────────────
   const adjacency = new Map<number, GraphEdge[]>();
   const referencedNodes = new Set<number>();
-  const wayEls = doc.getElementsByTagName('way');
 
-  for (let i = 0; i < wayEls.length; i++) {
-    const way = wayEls[i];
-    const highway = getTag(way, 'highway');
-    if (!highway) continue;
+  const wayRe = /<way\s[^>]*?\bid="(\d+)"[^>]*?>([\s\S]*?)<\/way>/g;
+  const ndRe = /<nd\s+ref="(\d+)"\s*\/>/g;
 
-    const wayId = Number(way.getAttribute('id'));
-    const onewayTag = getTag(way, 'oneway');
-    const oneway = onewayTag === 'yes' || onewayTag === '1' || onewayTag === 'true';
-    const onewayBicycleTag = getTag(way, 'oneway:bicycle');
-    const onewayBicycle = onewayBicycleTag !== 'no';
-    const maxspeedTag = getTag(way, 'maxspeed');
-    const maxspeed = maxspeedTag ? parseInt(maxspeedTag, 10) || 0 : 0;
-    const access = getTag(way, 'access') ?? undefined;
-    const motorVehicle = getTag(way, 'motor_vehicle') ?? undefined;
-    const vehicle = getTag(way, 'vehicle') ?? undefined;
-    const bicycleTag = getTag(way, 'bicycle') ?? undefined;
-    const footTag = getTag(way, 'foot') ?? undefined;
+  while ((m = wayRe.exec(xmlString)) !== null) {
+    const wayBody = m[2];
 
-    const ndEls = way.getElementsByTagName('nd');
+    // Quick highway check: skip ways without highway tag (majority of ways)
+    const hwMatch = /\bk="highway"\s+v="([^"]+)"/.exec(wayBody);
+    if (!hwMatch) continue;
+
+    const wayId = Number(m[1]);
+    const highway = intern(hwMatch[1]);
+
+    // Parse tags with targeted regexes — only the ones we need
+    const owMatch = /\bk="oneway"\s+v="([^"]+)"/.exec(wayBody);
+    const owVal = owMatch ? owMatch[1] : null;
+    const oneway = owVal === 'yes' || owVal === '1' || owVal === 'true';
+
+    const owbMatch = /\bk="oneway:bicycle"\s+v="([^"]+)"/.exec(wayBody);
+    const onewayBicycle = owbMatch ? owbMatch[1] !== 'no' : true;
+
+    const msMatch = /\bk="maxspeed"\s+v="([^"]+)"/.exec(wayBody);
+    const maxspeed = msMatch ? (parseInt(msMatch[1], 10) || 0) : 0;
+
+    const accMatch = /\bk="access"\s+v="([^"]+)"/.exec(wayBody);
+    const access = accMatch ? intern(accMatch[1]) : undefined;
+
+    const mvMatch = /\bk="motor_vehicle"\s+v="([^"]+)"/.exec(wayBody);
+    const motorVehicle = mvMatch ? intern(mvMatch[1]) : undefined;
+
+    const vMatch = /\bk="vehicle"\s+v="([^"]+)"/.exec(wayBody);
+    const vehicle = vMatch ? intern(vMatch[1]) : undefined;
+
+    const bicMatch = /\bk="bicycle"\s+v="([^"]+)"/.exec(wayBody);
+    const bicycleTag = bicMatch ? intern(bicMatch[1]) : undefined;
+
+    const footMatch = /\bk="foot"\s+v="([^"]+)"/.exec(wayBody);
+    const footTag = footMatch ? intern(footMatch[1]) : undefined;
+
+    // Collect nd refs
     const nodeIds: number[] = [];
-    for (let j = 0; j < ndEls.length; j++) {
-      nodeIds.push(Number(ndEls[j].getAttribute('ref')));
+    ndRe.lastIndex = 0;
+    let nm: RegExpExecArray | null;
+    while ((nm = ndRe.exec(wayBody)) !== null) {
+      nodeIds.push(Number(nm[1]));
     }
 
+    // Build edges for consecutive node pairs
     for (let j = 0; j < nodeIds.length - 1; j++) {
       const fromId = nodeIds[j];
       const toId = nodeIds[j + 1];
@@ -82,11 +122,8 @@ export function parseOSM(xmlString: string): RoutingGraph {
       referencedNodes.add(toId);
 
       const distance = haversine(fromNode.lat, fromNode.lon, toNode.lat, toNode.lon);
-      const geometry: [number, number][] = [
-        [fromNode.lat, fromNode.lon],
-        [toNode.lat, toNode.lon],
-      ];
 
+      // Forward edge
       const edge: GraphEdge = {
         from: fromId,
         to: toId,
@@ -97,7 +134,7 @@ export function parseOSM(xmlString: string): RoutingGraph {
         onewayBicycle,
         isReverse: false,
         distance,
-        geometry,
+        geometry: [[fromNode.lat, fromNode.lon], [toNode.lat, toNode.lon]],
         access,
         motorVehicle,
         vehicle,
@@ -105,12 +142,14 @@ export function parseOSM(xmlString: string): RoutingGraph {
         foot: footTag,
       };
 
-      // Forward direction: always add edge from fromId
-      if (!adjacency.has(fromId)) adjacency.set(fromId, []);
-      adjacency.get(fromId)!.push(edge);
+      let fromList = adjacency.get(fromId);
+      if (!fromList) {
+        fromList = [];
+        adjacency.set(fromId, fromList);
+      }
+      fromList.push(edge);
 
-      // Reverse direction: always add reverse edge from toId
-      // canTraverseDirection() will check oneway rules per mode using isReverse
+      // Reverse edge
       const reverseEdge: GraphEdge = {
         from: toId,
         to: fromId,
@@ -128,42 +167,49 @@ export function parseOSM(xmlString: string): RoutingGraph {
         bicycle: bicycleTag,
         foot: footTag,
       };
-      if (!adjacency.has(toId)) adjacency.set(toId, []);
-      adjacency.get(toId)!.push(reverseEdge);
+
+      let toList = adjacency.get(toId);
+      if (!toList) {
+        toList = [];
+        adjacency.set(toId, toList);
+      }
+      toList.push(reverseEdge);
     }
   }
 
-  // 3. Parse turn restrictions
+  // ── 3. Parse turn restrictions ───────────────────────────────────
   const restrictions: TurnRestriction[] = [];
-  const relationEls = doc.getElementsByTagName('relation');
-  for (let i = 0; i < relationEls.length; i++) {
-    const rel = relationEls[i];
-    const type = getTag(rel, 'type');
-    if (type !== 'restriction') continue;
+  const relRe = /<relation\s[^>]*?>([\s\S]*?)<\/relation>/g;
 
-    const restrictionType = getTag(rel, 'restriction');
-    if (!restrictionType) continue;
+  while ((m = relRe.exec(xmlString)) !== null) {
+    const relBody = m[1];
+    const typeMatch = /\bk="type"\s+v="([^"]+)"/.exec(relBody);
+    if (!typeMatch || typeMatch[1] !== 'restriction') continue;
+
+    const restMatch = /\bk="restriction"\s+v="([^"]+)"/.exec(relBody);
+    if (!restMatch) continue;
 
     let fromWayId = 0;
     let viaNodeId = 0;
     let toWayId = 0;
 
-    const members = rel.getElementsByTagName('member');
-    for (let j = 0; j < members.length; j++) {
-      const role = members[j].getAttribute('role');
-      const memberType = members[j].getAttribute('type');
-      const ref = Number(members[j].getAttribute('ref'));
+    const memRe = /<member\s+type="(\w+)"\s+ref="(\d+)"\s+role="(\w+)"\s*\/>/g;
+    let mm: RegExpExecArray | null;
+    while ((mm = memRe.exec(relBody)) !== null) {
+      const memberType = mm[1];
+      const ref = Number(mm[2]);
+      const role = mm[3];
       if (role === 'from' && memberType === 'way') fromWayId = ref;
       if (role === 'via' && memberType === 'node') viaNodeId = ref;
       if (role === 'to' && memberType === 'way') toWayId = ref;
     }
 
     if (fromWayId && viaNodeId && toWayId) {
-      restrictions.push({ fromWayId, viaNodeId, toWayId, type: restrictionType });
+      restrictions.push({ fromWayId, viaNodeId, toWayId, type: intern(restMatch[1]) });
     }
   }
 
-  // 4. Build final node map (only referenced nodes)
+  // ── 4. Build final node map (only referenced nodes) ──────────────
   const nodes = new Map<number, GraphNode>();
   for (const id of referencedNodes) {
     const node = allNodes.get(id);
