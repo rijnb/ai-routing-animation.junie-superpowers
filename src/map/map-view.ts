@@ -10,6 +10,7 @@ export class MapView {
     this.map = L.map(containerId, {
       zoomControl: true,
       attributionControl: true,
+      preferCanvas: true,
     });
     console.debug(`[MapView] L.map created, took ${(performance.now() - mapStart).toFixed(1)}ms`);
 
