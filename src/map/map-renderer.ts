@@ -143,17 +143,22 @@ export class MapRenderer {
   }
 
   getBounds(graph: RoutingGraph): L.LatLngBounds | null {
-    const lats: number[] = [];
-    const lons: number[] = [];
+    let minLat = Infinity;
+    let maxLat = -Infinity;
+    let minLon = Infinity;
+    let maxLon = -Infinity;
+    let count = 0;
+
     for (const node of graph.nodes.values()) {
-      lats.push(node.lat);
-      lons.push(node.lon);
+      if (node.lat < minLat) minLat = node.lat;
+      if (node.lat > maxLat) maxLat = node.lat;
+      if (node.lon < minLon) minLon = node.lon;
+      if (node.lon > maxLon) maxLon = node.lon;
+      count++;
     }
-    if (lats.length === 0) return null;
-    return L.latLngBounds(
-      [Math.min(...lats), Math.min(...lons)],
-      [Math.max(...lats), Math.max(...lons)],
-    );
+
+    if (count === 0) return null;
+    return L.latLngBounds([minLat, minLon], [maxLat, maxLon]);
   }
 
   private getRoadColor(highway: string): string {
