@@ -86,6 +86,13 @@ html, body {
   font-size: 14px;
 }
 
+.version-label {
+  font-size: 9px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
 .panel-body {
   padding: 12px 14px;
   display: flex;

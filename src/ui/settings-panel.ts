@@ -1,4 +1,5 @@
 import { RoutingMode } from '../osm/graph';
+import { APP_VERSION } from '../version';
 import { loadMapFileList } from './file-browser';
 
 export interface SettingsCallbacks {
@@ -80,7 +81,7 @@ export class SettingsPanel {
     // Header
     const header = document.createElement('div');
     header.className = 'panel-header';
-    header.innerHTML = '<span>⚙ Settings</span>';
+    header.innerHTML = `<span>⚙ Settings</span><span class="version-label">v${APP_VERSION}</span>`;
     this.container.appendChild(header);
 
     // Body
